@@ -1,0 +1,9 @@
+{
+  "id": "com.cgwolf.health_bar",
+  "name": "Custom Health Bar",
+  "version": "1.0",
+  "author": "CGWolf",
+  "description": "A fully customizable health bar.",
+  "icon": "res/icon.png",
+  "banner": "res/banner.png"
+}
