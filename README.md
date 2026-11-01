@@ -2,6 +2,12 @@
 
 A fully customizable health bar for Twilight Princess on Dusklight.
 
+**Version:** 1.0.1
+
+## Build dependencies
+
+CMake fetches the pinned Dusklight source checkout into `build/dusklight/`. This checkout is used only as a build-time dependency/reference; it is not included in the packaged `health_bar.dusk` mod. Keeping it under `build/` leaves the mod source directory uncluttered.
+
 ## Settings
 
 ### CUSTOMIZE
@@ -32,7 +38,8 @@ Top / Center / Bottom
 
 ## Features
 
-- Replaces the vanilla heart display with the game's full Lantern-use meter.
+- Replaces the vanilla heart display with a dedicated copy of the game's full Lantern-meter layout.
+- Keeps the original Lantern fuel meter working independently when using the item.
 - Preserves the normal HUD show/hide and fade behavior.
 - X/Y positioning with screen-edge and center anchors.
 - Adjustable Length from 50% to 300%, preserving the decorative end caps.

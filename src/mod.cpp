@@ -4,6 +4,9 @@
 #include "mods/svc/ui.h"
 #include "mods/svc/log.hpp"
 
+#include "JSystem/J2DGraph/J2DScreen.h"
+#include "JSystem/JKernel/JKRHeap.h"
+
 #include "d/d_com_inf_game.h"
 #include "d/d_meter_HIO.h"
 #include "d/d_meter2.h"
@@ -16,6 +19,11 @@
 #include <cstdint>
 #include <cstdio>
 
+#if TARGET_PC
+// Needed for the Dusklight UserSettings layout. getSettings() is resolved at runtime.
+#include "dusk/settings.h"
+#endif
+
 DEFINE_MOD();
 
 IMPORT_SERVICE(ConfigService, svc_config);
@@ -24,6 +32,11 @@ IMPORT_SERVICE(HookService, svc_hook);
 IMPORT_SERVICE(LogService, svc_log);
 
 namespace {
+
+#if TARGET_PC
+using DusklightGetSettingsFn = dusk::UserSettings& (*)();
+DusklightGetSettingsFn g_getDusklightSettings = nullptr;
+#endif
 
 constexpr int64_t kAlignmentLeft = 0;
 constexpr int64_t kAlignmentCenter = 1;
@@ -61,7 +74,13 @@ int64_t g_autoVisibilityRemainingFrames = 0;
 u16 g_previousLife = 0;
 bool g_previousLifeInitialized = false;
 bool g_autoVisibilityWasEnabled = false;
-dMeter2Draw_c* g_anchorMeter = nullptr;
+J2DScreen* g_healthBarScreen = nullptr;
+CPaneMgr* g_healthBarParent = nullptr;
+CPaneMgr* g_healthBarBase = nullptr;
+CPaneMgr* g_healthBarFrameL = nullptr;
+CPaneMgr* g_healthBarMeter = nullptr;
+CPaneMgr* g_healthBarFrameR = nullptr;
+CPaneMgr* g_anchorParent = nullptr;
 int64_t g_horizontalAnchor = kHorizontalAnchorLeft;
 int64_t g_verticalAnchor = kVerticalAnchorTop;
 f32 g_anchorXOffset = 0.0f;
@@ -70,7 +89,6 @@ JUtility::TColor g_colorOverrideBlack(0, 0, 0, 255);
 JUtility::TColor g_colorOverrideWhite(255, 77, 77, 255);
 
 DEFINE_HOOK(&dMeter2Draw_c::draw, HealthBarDrawHook);
-DEFINE_HOOK(&dMeter2Draw_c::drawKanteraScreen, LanternScreenHook);
 DEFINE_HOOK(&dMeter2_c::presentAnims, HealthVisibilityHook);
 DEFINE_HOOK(&CPaneMgr::setBlackWhite, PaneColorHook);
 DEFINE_HOOK(&CPaneMgr::paneTrans, HealthAnchorHook);
@@ -142,12 +160,13 @@ f32 get_target_ratio() {
 }
 
 static HookAction on_pane_trans_pre(ModContext*, void* args, void*, void*) {
-    if (!g_drawingCustomBar || g_anchorMeter == nullptr || g_anchorMeter->mpMagicParent == nullptr) {
+    if (!g_drawingCustomBar || g_anchorParent == nullptr || g_healthBarFrameL == nullptr ||
+        g_healthBarFrameR == nullptr) {
         return HOOK_CONTINUE;
     }
 
     CPaneMgr* pane = mods::arg<CPaneMgr*>(args, 0);
-    if (pane != g_anchorMeter->mpMagicParent) {
+    if (pane != g_anchorParent) {
         return HOOK_CONTINUE;
     }
 
@@ -158,12 +177,12 @@ static HookAction on_pane_trans_pre(ModContext*, void* args, void*, void*) {
     const f32 parentCenterX = pane->getInitCenterPosX();
     const f32 parentCenterY = pane->getInitCenterPosY();
 
-    const f32 visualLeft = g_anchorMeter->mpMagicFrameL->getPosX();
-    const f32 visualTop = g_anchorMeter->mpMagicFrameL->getPosY();
+    const f32 visualLeft = g_healthBarFrameL->getPosX();
+    const f32 visualTop = g_healthBarFrameL->getPosY();
     const f32 visualRight =
-        g_anchorMeter->mpMagicFrameR->getPosX() + g_anchorMeter->mpMagicFrameR->getSizeX();
+        g_healthBarFrameR->getPosX() + g_healthBarFrameR->getSizeX();
     const f32 visualBottom =
-        g_anchorMeter->mpMagicFrameL->getPosY() + g_anchorMeter->mpMagicFrameL->getSizeY();
+        g_healthBarFrameL->getPosY() + g_healthBarFrameL->getSizeY();
     const f32 visualWidth = visualRight - visualLeft;
     const f32 visualHeight = visualBottom - visualTop;
 
@@ -202,10 +221,8 @@ static HookAction on_pane_trans_pre(ModContext*, void* args, void*, void*) {
     }
     targetTop += g_anchorYOffset;
 
-    // Match CPaneMgr::paneTrans() exactly, but supply the center point that puts the
-    // actual Lantern frame edge on the requested viewport edge/center. At this hook
-    // point drawKanteraScreen() has already applied Dusklight's private HUD scale and
-    // has already moved/resized the frame for the configured Length.
+    // Match CPaneMgr::paneTrans() exactly, positioning the mod-owned frame at the
+    // selected viewport anchor after Dusklight's HUD scale and the custom length.
     auto& paneTransX = mods::arg_ref<f32>(args, 1);
     auto& paneTransY = mods::arg_ref<f32>(args, 2);
     paneTransX =
@@ -273,28 +290,93 @@ void update_auto_visibility(f32 hudAlpha) {
     }
 }
 
-void prepare_health_bar_meter(dMeter2Draw_c* meter, f32 ratio, f32 lengthScale, f32 posX, f32 posY) {
-    const f32 frameLeftX = meter->mpMagicFrameL->getInitPosX();
-    const f32 frameSpan = meter->mpMagicFrameR->getInitPosX() - frameLeftX;
-    const f32 meterWidth = meter->mpMagicMeter->getInitSizeX();
+f32 get_user_hud_scale() {
+#if TARGET_PC
+    if (g_getDusklightSettings == nullptr) {
+        return 1.0f;
+    }
+    return std::clamp(g_getDusklightSettings().game.hudScale.getValue(), 0.5f, 2.0f);
+#else
+    return 1.0f;
+#endif
+}
+
+void destroy_health_bar_screen() {
+    JKR_DELETE(g_healthBarFrameR);
+    g_healthBarFrameR = nullptr;
+    JKR_DELETE(g_healthBarMeter);
+    g_healthBarMeter = nullptr;
+    JKR_DELETE(g_healthBarFrameL);
+    g_healthBarFrameL = nullptr;
+    JKR_DELETE(g_healthBarBase);
+    g_healthBarBase = nullptr;
+    JKR_DELETE(g_healthBarParent);
+    g_healthBarParent = nullptr;
+    JKR_DELETE(g_healthBarScreen);
+    g_healthBarScreen = nullptr;
+    g_anchorParent = nullptr;
+    g_colorOverridePane = nullptr;
+}
+
+bool initialize_health_bar_screen() {
+    if (g_healthBarScreen != nullptr) {
+        return true;
+    }
+
+    J2DScreen* screen = JKR_NEW J2DScreen();
+    if (screen == nullptr) {
+        return false;
+    }
+
+    // Load a separate copy of the lantern layout. The game's oil meter continues to
+    // use dMeter2Draw_c::mpKanteraScreen, while this screen owns all health-bar panes.
+    if (!screen->setPriority("zelda_game_image_kantera.blo", 0x20000,
+                             dComIfGp_getMain2DArchive())) {
+        JKR_DELETE(screen);
+        return false;
+    }
+    dPaneClass_showNullPane(screen);
+
+    CPaneMgr* parent = JKR_NEW CPaneMgr(screen, MULTI_CHAR('magic_n'), 2, nullptr);
+    CPaneMgr* base = JKR_NEW CPaneMgr(screen, MULTI_CHAR('mm_base'), 0, nullptr);
+    CPaneMgr* frameL = JKR_NEW CPaneMgr(screen, MULTI_CHAR('m_w_l_n'), 2, nullptr);
+    CPaneMgr* meter = JKR_NEW CPaneMgr(screen, MULTI_CHAR('mm_00'), 0, nullptr);
+    CPaneMgr* frameR = JKR_NEW CPaneMgr(screen, MULTI_CHAR('m_w_r_n'), 2, nullptr);
+
+    if (parent == nullptr || base == nullptr || frameL == nullptr || meter == nullptr ||
+        frameR == nullptr) {
+        JKR_DELETE(frameR);
+        JKR_DELETE(meter);
+        JKR_DELETE(frameL);
+        JKR_DELETE(base);
+        JKR_DELETE(parent);
+        JKR_DELETE(screen);
+        return false;
+    }
+
+    g_healthBarScreen = screen;
+    g_healthBarParent = parent;
+    g_healthBarBase = base;
+    g_healthBarFrameL = frameL;
+    g_healthBarMeter = meter;
+    g_healthBarFrameR = frameR;
+    return true;
+}
+
+void prepare_health_bar_meter(f32 ratio, f32 lengthScale) {
+    const f32 frameLeftX = g_healthBarFrameL->getInitPosX();
+    const f32 frameSpan = g_healthBarFrameR->getInitPosX() - frameLeftX;
+    const f32 meterWidth = g_healthBarMeter->getInitSizeX();
     const f32 lengthGrowth = meterWidth * (lengthScale - 1.0f);
 
-    meter->field_0x584[1] = ratio * meterWidth * lengthScale;
-    meter->field_0x590[1] = meter->mpMagicMeter->getInitSizeY();
-    meter->field_0x59c[1] = frameLeftX + frameSpan + lengthGrowth;
-    meter->field_0x5a8[1] = meter->mpMagicFrameL->getInitPosY();
-    meter->field_0x5b4[1] = meter->mpMagicBase->getInitSizeX() + lengthGrowth;
-    meter->field_0x5c0[1] = meter->mpMagicBase->getInitSizeY();
-    meter->field_0x5cc[1] = g_drawHIO.mLanternMeterScale;
-    meter->field_0x5d8[1] = g_drawHIO.mLanternMeterScale;
-    meter->field_0x5e4[1] = posX;
-    meter->field_0x5f0[1] = posY;
+    g_healthBarMeter->resize(ratio * meterWidth * lengthScale, g_healthBarMeter->getInitSizeY());
+    g_healthBarFrameR->move(frameLeftX + frameSpan + lengthGrowth, g_healthBarFrameR->getInitPosY());
+    g_healthBarBase->resize(g_healthBarBase->getInitSizeX() + lengthGrowth,
+                            g_healthBarBase->getInitSizeY());
 }
 
 void draw_health_bar(dMeter2Draw_c* meter) {
-    if (meter == nullptr || meter->mpKanteraScreen == nullptr || meter->mpMagicParent == nullptr ||
-        meter->mpMagicBase == nullptr || meter->mpMagicFrameL == nullptr ||
-        meter->mpMagicFrameR == nullptr || meter->mpMagicMeter == nullptr || g_healthBarAlpha <= 0.001f) {
+    if (meter == nullptr || g_healthBarAlpha <= 0.001f || !initialize_health_bar_screen()) {
         return;
     }
 
@@ -332,31 +414,55 @@ void draw_health_bar(dMeter2Draw_c* meter) {
 
     const f32 lengthScale = std::clamp(static_cast<f32>(lengthPercent) / 100.0f, 0.5f, 3.0f);
     const f32 customScale = std::clamp(static_cast<f32>(scalePercent) / 100.0f, 0.5f, 2.0f);
+    const f32 userHudScale = get_user_hud_scale();
+    const f32 healthAlpha = g_healthBarAlpha * g_autoVisibilityAlpha;
 
-    prepare_health_bar_meter(
-        meter, g_displayRatio, lengthScale, static_cast<f32>(xPos), static_cast<f32>(yPos));
-    meter->field_0x5cc[1] = g_drawHIO.mLanternMeterScale * customScale;
-    meter->field_0x5d8[1] = g_drawHIO.mLanternMeterScale * customScale;
+    prepare_health_bar_meter(g_displayRatio, lengthScale);
 
-    const f32 savedMeterAlphaRate = meter->mMeterAlphaRate[1];
-    meter->mMeterAlphaRate[1] = g_healthBarAlpha * g_autoVisibilityAlpha;
+    // Match Dusklight's normal lantern-meter alpha and scale behavior, but apply it
+    // only to this mod-owned screen and panes.
+    g_healthBarParent->setAlphaRate(healthAlpha);
+    g_healthBarMeter->setAlphaRate(g_drawHIO.mLanternMeterAlpha * healthAlpha);
+    const f32 frameAlpha = g_drawHIO.mLanternMeterFrameAlpha * healthAlpha;
+    g_healthBarFrameL->setAlphaRate(frameAlpha);
+    g_healthBarFrameR->setAlphaRate(frameAlpha);
+
+    g_healthBarParent->scale(g_drawHIO.mLanternMeterScale * customScale * userHudScale,
+                             g_drawHIO.mLanternMeterScale * customScale * userHudScale);
+
+    f32 panePosX = static_cast<f32>(xPos);
+    f32 panePosY = static_cast<f32>(yPos);
+    const f32 hudScaleOffset = (1.0f - userHudScale) * 0.5f;
+    panePosX -= g_healthBarParent->getInitSizeX() * hudScaleOffset * 0.3f;
+    panePosY -= g_healthBarParent->getInitSizeY() * hudScaleOffset;
+
     update_color_override();
-    g_colorOverridePane = meter->mpMagicMeter;
-    g_anchorMeter = meter;
+    g_colorOverridePane = g_healthBarMeter;
+    g_anchorParent = g_healthBarParent;
     g_horizontalAnchor = hAnchor;
     g_verticalAnchor = vAnchor;
     g_anchorXOffset = static_cast<f32>(xPos);
     g_anchorYOffset = static_cast<f32>(yPos);
     g_drawingCustomBar = true;
-    meter->drawKanteraScreen(1);
-    g_drawingCustomBar = false;
-    g_anchorMeter = nullptr;
-    g_colorOverridePane = nullptr;
-    meter->mMeterAlphaRate[1] = savedMeterAlphaRate;
 
-    const f32 totalWidth = meter->mpMagicMeter->getInitSizeX() * lengthScale;
-    const f32 initialX = meter->mpMagicMeter->getInitPosX();
-    const f32 currentWidth = meter->mpMagicMeter->getSizeX();
+    // This call passes through PaneColorHook, which substitutes the user's selected
+    // color for the normal oil-meter gold. The original screen is never modified.
+    g_healthBarMeter->setBlackWhite(
+        JUtility::TColor(255, 255, 140, 255), JUtility::TColor(230, 170, 0, 255));
+    g_healthBarParent->paneTrans(panePosX, panePosY);
+
+    J2DGrafContext* grafContext = dComIfGp_getCurrentGrafPort();
+    if (grafContext != nullptr) {
+        g_healthBarScreen->draw(0.0f, 0.0f, grafContext);
+    }
+
+    g_drawingCustomBar = false;
+    g_anchorParent = nullptr;
+    g_colorOverridePane = nullptr;
+
+    const f32 totalWidth = g_healthBarMeter->getInitSizeX() * lengthScale;
+    const f32 initialX = g_healthBarMeter->getInitPosX();
+    const f32 currentWidth = g_healthBarMeter->getSizeX();
     if (totalWidth <= 0.0f) {
         return;
     }
@@ -368,15 +474,7 @@ void draw_health_bar(dMeter2Draw_c* meter) {
         offset = totalWidth - currentWidth;
     }
 
-    meter->mpMagicMeter->move(initialX + offset, meter->mpMagicMeter->getInitPosY());
-}
-
-static HookAction on_lantern_screen_pre(ModContext*, void* args, void*, void*) {
-    const u8 meterType = mods::arg<u8>(args, 1);
-    if (meterType == 1 && !g_drawingCustomBar) {
-        return HOOK_SKIP_ORIGINAL;
-    }
-    return HOOK_CONTINUE;
+    g_healthBarMeter->move(initialX + offset, g_healthBarMeter->getInitPosY());
 }
 
 static void on_health_visibility_post(ModContext*, void* args, void*, void*) {
@@ -699,7 +797,24 @@ ModResult register_string_config(
 extern "C" {
 
 MOD_EXPORT ModResult mod_initialize(ModError* error) {
-    ModResult result = register_int_config(mod_ctx, "x_position", 0, &g_xPosVar);
+    ModResult result = MOD_OK;
+#if TARGET_PC
+    // getSettings() is part of Dusklight's game binary, not the mod link stub.
+    // Resolve it at runtime through the symbol manifest instead of creating an
+    // unresolved static-link dependency on a non-exported game function.
+    void* settingsAddress = nullptr;
+    HookSymbolFlags settingsFlags{};
+    result = svc_hook->resolve(mod_ctx, "src/dusk/settings.cpp#dusk::getSettings",
+                               &settingsAddress, &settingsFlags);
+    if (result != MOD_OK || settingsAddress == nullptr ||
+        (settingsFlags & HOOK_SYMBOL_CODE) == 0) {
+        const ModResult failure = result == MOD_OK ? MOD_UNAVAILABLE : result;
+        return mods::set_error(error, failure, "failed to resolve Dusklight HUD settings");
+    }
+    g_getDusklightSettings = reinterpret_cast<DusklightGetSettingsFn>(settingsAddress);
+#endif
+
+    result = register_int_config(mod_ctx, "x_position", 0, &g_xPosVar);
     if (result != MOD_OK) {
         return mods::set_error(error, result, "failed to register x_position");
     }
@@ -792,16 +907,8 @@ select-button.health-bar-wide-label value {
         return mods::set_error(error, result, "failed to install health anchor hook");
     }
 
-    result = mods::hook::add_pre<LanternScreenHook>(on_lantern_screen_pre);
-    if (result != MOD_OK) {
-        mods::hook::uninstall<HealthAnchorHook>();
-        mods::hook::uninstall<PaneColorHook>();
-        return mods::set_error(error, result, "failed to install Lantern-screen hook");
-    }
-
     result = mods::hook::add_post<HealthVisibilityHook>(on_health_visibility_post);
     if (result != MOD_OK) {
-        mods::hook::uninstall<LanternScreenHook>();
         mods::hook::uninstall<HealthAnchorHook>();
         mods::hook::uninstall<PaneColorHook>();
         return mods::set_error(error, result, "failed to install HUD visibility hook");
@@ -810,7 +917,6 @@ select-button.health-bar-wide-label value {
     result = mods::hook::add_post<HealthBarDrawHook>(on_health_bar_draw_post);
     if (result != MOD_OK) {
         mods::hook::uninstall<HealthVisibilityHook>();
-        mods::hook::uninstall<LanternScreenHook>();
         mods::hook::uninstall<HealthAnchorHook>();
         mods::hook::uninstall<PaneColorHook>();
         return mods::set_error(error, result, "failed to install health-bar draw hook");
@@ -832,23 +938,23 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
 
     const ModResult drawHookResult = mods::hook::uninstall<HealthBarDrawHook>();
     const ModResult visibilityHookResult = mods::hook::uninstall<HealthVisibilityHook>();
-    const ModResult lanternHookResult = mods::hook::uninstall<LanternScreenHook>();
     const ModResult anchorHookResult = mods::hook::uninstall<HealthAnchorHook>();
     const ModResult colorHookResult = mods::hook::uninstall<PaneColorHook>();
     g_displayRatio = -1.0f;
     g_healthBarAlpha = 0.0f;
     g_drawingCustomBar = false;
-    g_anchorMeter = nullptr;
-    g_colorOverridePane = nullptr;
+    destroy_health_bar_screen();
     g_autoVisibilityAlpha = 1.0f;
     g_autoVisibilityRemainingFrames = 0;
     g_previousLife = 0;
     g_previousLifeInitialized = false;
     g_autoVisibilityWasEnabled = false;
+#if TARGET_PC
+    g_getDusklightSettings = nullptr;
+#endif
     return drawHookResult != MOD_OK ? drawHookResult
          : (visibilityHookResult != MOD_OK ? visibilityHookResult
-         : (lanternHookResult != MOD_OK ? lanternHookResult
-         : (anchorHookResult != MOD_OK ? anchorHookResult : colorHookResult)));
+         : (anchorHookResult != MOD_OK ? anchorHookResult : colorHookResult));
 }
 
 }  // extern "C"

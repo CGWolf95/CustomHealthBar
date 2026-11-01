@@ -53,7 +53,7 @@ jobs:
       - name: Cache Dusklight sources
         uses: actions/cache@v6
         with:
-          path: dusklight
+          path: build/dusklight
           key: dusklight-${{runner.os}}-${{steps.dusklight.outputs.version}}
 
       - name: Enable Visual Studio environment

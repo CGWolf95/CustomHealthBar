@@ -3,14 +3,14 @@
 # Inputs:
 #   DUSKLIGHT_VERSION       git tag or commit SHA to fetch (required unless DUSKLIGHT_DIR
 #                           points at an existing checkout)
-#   DUSKLIGHT_DIR           Dusklight checkout, default <source>/dusklight. Point it at an
+#   DUSKLIGHT_DIR           Dusklight checkout, default <build>/dusklight. Point it at an
 #                           existing checkout (e.g. a Dusklight development tree) to skip
 #                           fetching entirely.
 #   DUSKLIGHT_REPOSITORY    git remote to fetch from
 
 include_guard(GLOBAL)
 
-set(DUSKLIGHT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dusklight"
+set(DUSKLIGHT_DIR "${CMAKE_CURRENT_BINARY_DIR}/dusklight"
         CACHE PATH "Path to the Dusklight source tree")
 set(DUSKLIGHT_REPOSITORY "https://github.com/TwilitRealm/dusklight.git"
         CACHE STRING "Dusklight git repository to fetch from")
