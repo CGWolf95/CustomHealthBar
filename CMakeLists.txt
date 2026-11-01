@@ -7,13 +7,13 @@ if (NOT DEFINED CMAKE_BUILD_TYPE AND NOT DEFINED ENV{CMAKE_BUILD_TYPE})
     set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Build type")
 endif ()
 
-project(health_bar VERSION 1.0 LANGUAGES CXX)
+project(health_bar VERSION 1.0.1 LANGUAGES CXX)
 
 # The Dusklight version to build against.
 if (NOT DUSKLIGHT_VERSION)
     set(DUSKLIGHT_VERSION "v2.0.2")
 endif ()
-# Fetches the Dusklight sources into ./dusklight and provides DUSKLIGHT_DIR.
+# Fetches the Dusklight sources into build/dusklight and provides DUSKLIGHT_DIR.
 # Use -DDUSKLIGHT_DIR= to point at an existing Dusklight checkout.
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDusklight.cmake")
 add_subdirectory("${DUSKLIGHT_DIR}/sdk" dusklight-sdk EXCLUDE_FROM_ALL)
@@ -28,3 +28,9 @@ add_mod(health_bar
         OVERLAY_DIR overlay
         TEXTURES_DIR textures
 )
+
+# The mod mirrors Dusklight's own HUD-scale behavior. UserSettings is declared
+# in the internal source header (src/dusk/settings.h), outside the public SDK
+# include paths. The accessor itself is resolved at runtime through HookService,
+# since it is not part of the mod link stub. Keep this include private to the mod.
+target_include_directories(health_bar PRIVATE "${DUSKLIGHT_DIR}/src")
